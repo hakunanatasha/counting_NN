@@ -227,9 +227,10 @@ if __name__ == '__main__':
 
     # User Parameters
     ldir = ''
-    num_epochs = 1000
+    ptrain = 0.8
+    num_epochs = 5000
     learning_rate = 0.0001
-    gamma = 0.1
+    gamma = 0.5
     input_dim = 1
     lr_fxn = lambda x: lr_rate(x, gamma)
 
@@ -239,7 +240,7 @@ if __name__ == '__main__':
     # -------------- #
 
     # Load the data
-    xseq_train, xseq_test, xtrain, xtest, ytrain, ytest = get_data(ldir)
+    xseq_train, xseq_test, xtrain, xtest, ytrain, ytest = get_data(ldir, ptrain)
 
     # -------------- #
     #  MODEL SETUP  
