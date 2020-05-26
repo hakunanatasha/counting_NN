@@ -10,14 +10,20 @@ and then N "b" in a row, as such:
 ex: N = 5
 'aaaaabbbbb' => True
 'aaabbaaabb' => False
+
+TODO:
+Check if the negative-set accidentally gets a positive case and swap
 """
 
 import numpy as np
 from numpy.random import rand
 import os
 
-# Define sequences
+# Save data if the directory doesn't already exist
+savedir = "data/"
+np.random.seed(1) # Reproducibility in the language 
 
+# Define sequences
 def define_seq(Nlen, pgen=[1, 0]):
     """
     Create a string where the likelihood of generating
@@ -36,25 +42,23 @@ def define_seq(Nlen, pgen=[1, 0]):
 # -------------------------- #
 # Generate training data 
 
-Nlen = 25 #1/2 length of sequence (input)
+Nlen = 100 #1/2 length of sequence (input)
 
-Ntrue = 5000  # Training of positive class
+Ntrue = 7000  # Training of positive class
 
-Nfalse = 5000 # Training of negative class
+Nfalse = 7000 # Training of negative class
 
+# Generate the "true" language
 pos = list(map(lambda x: define_seq(Nlen)+"\n", range(Ntrue)))
-neg = list(map(lambda x: define_seq(Nlen, pgen=[rand(1), rand(1)]) + "\n", range(Nfalse)))
+
+# Generate variable length sequences for false case
+neg = list(map(lambda x: define_seq(np.random.randint(1, Nlen), pgen=[0.5, 0.5]) + "\n", range(Nfalse)))
 
 # -------------------------- #
-# Save data if the directory doesn't already exist
-savedir = "/Users/NSEELAM/Dropbox (MIT)/Classes_2020/NS_Projects/counting_NN/"
+with open(os.path.join(savedir + "positive_lang.txt"), "w") as f:
+    f.writelines(pos)
 
-if os.path.exists(savedir + "data") is False:
-    
-    os.makedirs(savedir + "data/")
+with open(os.path.join(savedir + "negative_lang.txt"), "w") as f:
+    f.writelines(neg)
 
-    with open(savedir + "data/positive_lang.txt", "w") as f:
-        f.writelines(pos)
-
-    with open(savedir + "data/negative_lang.txt", "w") as f:
-        f.writelines(neg)
+print("Completed language data.")

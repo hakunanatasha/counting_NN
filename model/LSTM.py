@@ -6,13 +6,41 @@ Teaching an LSTM to count using sequences of a^N x b ^N.
 
 Paper: https://arxiv.org/pdf/1805.04908.pdf
 
-Note, the parameters are 10-dimensin 1-layer LSTM. Activation - ReLU
+Note, the parameters are 10-dimension 1-layer LSTM. Activation - ReLU
 
 The claims of the paper include:
 (1) LSTMS can recognize 'languages' of the form a^N x b^N etc.
 (2) LSTMS trained on this can *generalize* to other counting forms (i.e. N=100 -> N=256)
 (3) Trained LSTMs hidden layers show this counting mechanism in one of their hidden unit.
+
+Notes:
+2020/05/25
++ Switched to one-hot-encoding of language 
++ Add pack-padded sequences for variable length
+
+Note, I've seen some claims suggesting sorted sequences are even faster to compute on. That being said,
+pytorch is now compatible without sorting so I'll leave it as is, as it's educational.
+
+2020/05/24
++ Save train intermittently
++ The paper claimed training ends after 100% accuracy is attained on the test-set.
++ I'm using an extraordinarily slow LR so 5000 is totally overkill on the number of epochs
+I noticed some weird behavior at certain losses; 
+
+2020/05/21
++ Learning rate is too aggressive; employed a schedular to modulate it over time.
+Using LambdaLR
++ Added torch random-seed
+
+2020/05/20
++ Basic LSTM skeleton completed
++ Loss function cross-entropy
++ Note, this is a "2-character language" s.t. 1 input feature is required
+for the LSTM ("is A/is not A"). This should be extended for the 3-character test.
++ *** Aside *** 2 inputs [1, 0] == a; [0, 1] == b; [0, 0] == c
+
 """
+import os
 import numpy as np
 import torch
 import torch.autograd as autograd
@@ -20,10 +48,12 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import LambdaLR
 
-import numpy as np
+# For variable length sequences
+from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 
-torch.manual_seed(1)
-np.random.seed(1)
+#Saving
+import joblib as jb
+
 # ---------------- #
 # Language model (number of unique characters)
 alphabet = ['a', 'b']
@@ -32,23 +62,38 @@ alphabet = ['a', 'b']
 d = {letter: idx for idx, letter in enumerate(alphabet)}
 invd = {value:key for key, value in d.items()}
 
+# ---------------- #
 # Classes/Models
 def encode_sample(x, translate=d):
     """
     Encode a sequence, described by dictionary "d"
-    into a compatible input tensor
+    into a compatible input tensor.
+
     """
-    return torch.tensor(list(map(lambda i: translate[i], x[:])))
+    count = np.zeros(shape=(len(x), len(d)))
+    t = [(i, j) for i, j in enumerate(list(map(lambda i: translate[i], x[:])))]
+    count[tuple(zip(*t))]=1
+    return torch.tensor(count)
 
 
-def get_data(ldir, ptrain=0.7, rseed=1234, encoder=encode_sample):
+def get_data(idir, 
+             ptrain=0.7, 
+             rseed=1234, 
+             bfirst=True,
+             encoder=encode_sample):
     """
     Retrieve the dataset of interest
     """
-    with open(ldir + 'data/positive_lang.txt', 'r') as f:
+    if idir is not None:
+        datadir = idir
+    else:
+        datadir = 'data/'
+
+
+    with open(os.path.join(datadir, 'positive_lang.txt'), 'r') as f:
         Xpos = f.readlines()
 
-    with open(ldir + 'data/negative_lang.txt', 'r') as f:
+    with open(os.path.join(datadir, 'negative_lang.txt'), 'r') as f:
         Xneg = f.readlines()
 
     Xpos, Xneg = [i.strip('\n') for i in Xpos], [i.strip('\n') for i in Xneg]
@@ -59,20 +104,37 @@ def get_data(ldir, ptrain=0.7, rseed=1234, encoder=encode_sample):
     Ntrainpos = int(Npos * ptrain)
     Ntrainneg = int(Nneg * ptrain)
 
-    Ntestpos = int(Npos * (1- ptrain))
-    Ntestneg = int(Nneg * (1- ptrain))
+    Ntestpos = int(Npos - Ntrainpos)
+    Ntestneg = int(Nneg - Ntrainneg)
 
     xtrain = Xpos[:int(Ntrainpos)] + Xneg[:int(Ntrainneg)]
     xtest  = Xpos[int(Ntrainpos):] + Xneg[int(Ntrainneg):]
+
+    # Convert to OHE
+    xtrain = tuple(map(lambda x: encode_sample(x), xtrain))
+    xtest  = tuple(map(lambda x: encode_sample(x), xtest))
+
+    xtrain_lens = list(map(lambda i: len(i), xtrain))
+    xtest_lens  = list(map(lambda i: len(i), xtest))
 
     ytrain = torch.cat((torch.ones(Ntrainpos, dtype=torch.long), torch.zeros(Ntrainneg, dtype=torch.long)))
     ytest  = torch.cat((torch.ones(Ntestpos, dtype=torch.long), torch.zeros(Ntestneg, dtype=torch.long)))
 
     # Order should be [Time Steps x N_samples x N_features]
-    X  = torch.stack(tuple(map(lambda x: encode_sample(x), xtrain)), 0).float()
-    Xt = torch.stack(tuple(map(lambda x: encode_sample(x), xtest)), 0).float()
+    X  = pad_sequence(xtrain, padding_value=0)
+    Xt = pad_sequence(xtest, padding_value=0)
 
-    return xtrain, xtest, X, Xt, ytrain, ytest
+    Xpacked  = pack_padded_sequence(X, 
+                                    xtrain_lens, 
+                                    batch_first=bfirst, 
+                                    enforce_sorted=False).float()
+    
+    Xtpacked = pack_padded_sequence(Xt, 
+                                    xtest_lens, 
+                                    batch_first=bfirst, 
+                                    enforce_sorted=False).float()
+
+    return xtrain, xtest, Xpacked, Xtpacked, ytrain, ytest
 
 
 class LSTM_model(nn.Module):
@@ -92,7 +154,7 @@ class LSTM_model(nn.Module):
                  hidden_dim=10,
                  output_dim=2,
                  num_layers=1,
-                 bfirst=True):
+                 bfirst=False):
 
         super(LSTM_model, self).__init__()
 
@@ -112,18 +174,12 @@ class LSTM_model(nn.Module):
         # Softmax output to classify
         self.softmax = nn.LogSoftmax(dim=1)
 
-    def forward(self, x):
+    def forward(self, xdata, batch_size):
         """
+        2020.05.25- packed padded sequence approach
+
         Forward pass through NN; 
         """
-        if len(x.size()) < 3:
-            x = x.view([x.size(0), x.size(1), 1])
-
-        if self.batch_first:
-            batch_size = x.shape[0]
-        else:
-            batch_size = x.shape[1]
-
         # Initialize the hidden states
         h0 = torch.zeros(self.num_layers, batch_size, self.hidden_dim).requires_grad_()
 
@@ -131,7 +187,7 @@ class LSTM_model(nn.Module):
         c0 = torch.zeros(self.num_layers, batch_size, self.hidden_dim).requires_grad_()
 
         # Outputs
-        out, (hn, cn) = self.lstm(x, (h0.detach(), c0.detach()))
+        out, (hn, cn) = self.lstm(xdata, (h0.detach(), c0.detach()))
 
         #Note, hn[-1] == out[:, -1, :]
         y_out = self.hidden2out(hn[-1])
@@ -150,7 +206,8 @@ def train(model,
           y, 
           xtest, 
           ytest,
-          target_accuracy=.9999):
+          target_accuracy=.9999,
+          savefreq=100):
     """
     Define a model, and train it.
 
@@ -161,15 +218,29 @@ def train(model,
     num_epochs - number of training epochs
     x - training set
     y - training labels
+    xtest - 'validation' set
+    ytest - 'validation' outputs
+    target_accuracy - end training if model performs better than this accuracy
+    savefreq - number of iterations to save after
     """
     # Set up the scheduler, and parameters
     optimiser = torch.optim.SGD(parameters, lr=learning_rate)
     scheduler = LambdaLR(optimiser, lr_lambda=lr_fxn)
 
     losses = []
+
+    xout, _ = pad_packed_sequence(xtrain)
+    xoutt, _ = pad_packed_sequence(xtest)
+    if model.batch_first:
+        batch_train = xout.size(0)
+        batch_test = xoutt.size(0)
+    else:
+        batch_train = xout.size(1)
+        batch_test = xoutt.size(1)
+
     for t in range(num_epochs):
 
-        yout, _, out, hn, cn = model(x)
+        yout, _, out, hn, cn = model(x, batch_train)
 
         loss = loss_fxn(yout, y)
 
@@ -182,7 +253,7 @@ def train(model,
         #ypred = torch.argmax(ypred, axis=1)
         #accuracy = 1 - torch.abs(ypred - y).sum().item()/y.size(0)
 
-        _, ypred, _, _, _ = model(xtest)
+        _, ypred, _, _, _ = model(xtest, batch_test)
         ypred = torch.argmax(ypred, axis=1)
         accuracy = 1 - torch.abs(ypred - ytest).sum().item()/ytest.size(0) # Count the number mis-matched
 
@@ -202,7 +273,10 @@ def train(model,
         if accuracy >= target_accuracy:
             break
 
-    return losses
+        if (t%savefreq) == 0:
+            torch.save(model, 'tmpmodel.pt')
+
+    return model, optimiser, losses
 
 
 def classify(ypred):
@@ -221,57 +295,4 @@ def lr_rate(epoch, gamma=0.5):
 
 # ---------------- #
 
-# ---------------- #
-
-if __name__ == '__main__':
-
-    # User Parameters
-    ldir = ''
-    ptrain = 0.8
-    num_epochs = 5000
-    learning_rate = 0.0001
-    gamma = 0.5
-    input_dim = 1
-    lr_fxn = lambda x: lr_rate(x, gamma)
-
-    sname = 'model/countingLSTM_AB.pt'
-    # -------------- #
-    #    DATASET
-    # -------------- #
-
-    # Load the data
-    xseq_train, xseq_test, xtrain, xtest, ytrain, ytest = get_data(ldir, ptrain)
-
-    # -------------- #
-    #  MODEL SETUP  
-    # -------------- #
-
-    # Initialize model, and optimiser
-
-    model = LSTM_model(input_dim)
-
-    # Optimizer - set to all modifiable/learnable parameters
-    parameters = filter(lambda p: p.requires_grad, model.parameters())
-
-    # Loss Function (Categorical/X-ent)
-    criterion = nn.CrossEntropyLoss()
-
-    # -------------- #
-    #  MODEL TRAIN
-    # -------------- #
-
-    # Train model
-    model, optimiser, loss = train(model, 
-                                   parameters, 
-                                   learning_rate,
-                                   lr_fxn,
-                                   criterion, 
-                                   num_epochs, 
-                                   xtrain, 
-                                   ytrain,
-                                   xtest,
-                                   ytest)
-
-    # Save torch model
-    torch.save(model, sname)
 
